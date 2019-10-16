@@ -21,6 +21,7 @@ class OpenFigiPostAPI:
         #Mapping job must be a list of dicts as specified by OpenFigi.
         if isinstance(Ids,list) == True and isinstance(Ids[0],dict) == True:
             response = rq.post(url = openfigi_url,json = Ids,timeout = 10,headers = header)
+            return response.text
         else:
             return 'Data does not conform to OpenFigi specification. The data being passed in must be a Python List of Dictionaries.'
 
