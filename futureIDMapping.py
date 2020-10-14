@@ -16,7 +16,7 @@ See https://www.openfigi.com/api for more information.
 '''
 
 openfigi_url = 'https://api.openfigi.com/v2/mapping'
-openfigi_apikey = 'e401fd30-1591-4052-b3bb-0a86eb447549'
+openfigi_apikey = 'dummy_api_key' # to be replaced
 openfigi_headers = {'Content-Type': 'application/json'}
 
 if openfigi_apikey: 
@@ -319,10 +319,10 @@ if __name__ == '__main__':
         Utilities.addDefaultCommandLine(cmdlineParser)
                     
         cmdlineParser.add_option("--user", action="store",
-                                 default='MarketdataLoader', dest="user",
+                                 default='dummy_un', dest="user",
                                  help="DB user name")
         cmdlineParser.add_option("--passwd", action="store",
-                                 default='mdl1234', dest="passwd",
+                                 default='dummy_pw', dest="passwd",
                                  help="DB password name")
         cmdlineParser.add_option("--database", action="store",
                                  default='MarketData', dest="database",
