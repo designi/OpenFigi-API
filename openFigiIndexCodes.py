@@ -38,7 +38,7 @@ def main():
     elif ',' in code:
         codeList = code.split(',')
         for i in codeList:
-            print('Looking up list of codes --> {}'.format(i))
+            print('Looking up code --> {}'.format(i))
             jobs.append({"idType":"VENDOR_INDEX_CODE","idValue":"{}".format(i)})
     results = mapIndexVndrToBB(jobs)
     if 'data' in results:
