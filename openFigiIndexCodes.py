@@ -51,6 +51,7 @@ if __name__ == '__main__':
     
     #Mapping Jobs
 # =============================================================================
+# e.g. https://www.openfigi.com/api
 #     IdMap = [
 #     { "idType": "ID_ISIN", "idValue": "US4592001014" },\
 #     { "idType": "ID_WERTPAPIER", "idValue": "851399", "exchCode": "US" },\
@@ -62,5 +63,4 @@ if __name__ == '__main__':
 #     { "idType":"BASE_TICKER", "idValue":"IBM", "marketSecDes":"Corp", "securityType2":"Corp", "maturity":["2026-11-01",None]},\
 #     { "idType":"BASE_TICKER", "idValue":"2251Q", "securityType2":"Common Stock", "includeUnlistedEquities": True}] 
 # =============================================================================
-    #IdMap = [{ "idType":"TICKER", "idValue":"NDV20"},{"marketSecDes":"Comdty"}]
 
