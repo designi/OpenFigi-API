@@ -1,14 +1,20 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Dec  9 13:38:12 2020
+
+@author: ngarcia
+"""
+
 import requests 
 import sys
 import optparse
 import pymssql
 import configparser
-import pymssql
-import numpy as np
 import pandas as pd
 import logging
 import time
 
+from marketdb import Connections
 from marketdb import Utilities
 
 '''
@@ -16,7 +22,7 @@ See https://www.openfigi.com/api for more information.
 '''
 
 openfigi_url = 'https://api.openfigi.com/v2/mapping'
-openfigi_apikey = 'dummy_api_key' # to be replaced
+openfigi_apikey = None
 openfigi_headers = {'Content-Type': 'application/json'}
 
 if openfigi_apikey: 
@@ -26,34 +32,80 @@ class OpenFigiException(Exception):
     def __init__(self, value):
         self.parameter = value
     def __str__(self):
-        return 'OpenFigi api returned error {0}'.format(self.parameter)
+        return 'OpenFigi api returned error -> {0}'.format(self.parameter)
 
 class FindFutureMapping:
-        
-        def __init__(self,db):
+
+        def __init__(self,db,config,connections):
                 self.cursor=db.cursor()
-                self.FutureMonthMap=({'JAN':'F','FEB':'G','MAR':'H','APR':'J','MAY':'K','JUN':'M','JUL':'N','AUG':'Q','SEP':'U','OCT':'V','NOV':'X','DEC':'Z'})
+                self.config = config
+                self.connections = connections
+                self.marketDB = connections.marketDB
+                self.mssql = connections.qaDirect
+                self.marketData = connections.marketData
+                self.FutureMonthToCode=({'JAN':'F','FEB':'G','MAR':'H','APR':'J','MAY':'K','JUN':'M','JUL':'N','AUG':'Q','SEP':'U','OCT':'V','NOV':'X','DEC':'Z'})
+                self.FutureCodeToMonth=dict((v,k) for k,v in self.FutureMonthToCode.items())
                 self.bloombergSecurityTypes = {'Financial index future.': 'Index','Generic currency future.':'Curncy','Generic index future.':'Index','Physical commodity future.': 'Comdty','Financial commodity future.': 'Comdty','SINGLE STOCK DIVIDEND FUTURE': 'Equity','DIVIDEND NEUTRAL STOCK FUTURE': 'Equity', 'Currency future.': 'Curncy', 'Physical index future.': 'Index'}
                 self.marketSecDes = list(set(self.bloombergSecurityTypes.values()))
                 self.bbFutTickerSuffix = ('Comdty','Curncy','Index','Equity')
-                self.ejv_asset_category_cd = ({'BFS:Comdty','BFU:Comdty','CFU:Curncy','CMF:Comdty','EIF:Index','IRF:Comdty'})
+                self.ejv_bb_asset_category = {'Curncy': 'CFU', 'Index': 'EIF','Comdty':('BFU','CFU','IRF','EFU')}
                 self.ejv_asset_category_descr = ({'BFS':'Bond Future Spread','BFU':'Bond Future','CFU':'Currency Future','CMF':'Commodity Future','EIF':'Equity/Index Future','IRF':'Interest Rate Future'})
+        
+        def readBloombergExchMicMap(self):
+                query = """ SELECT BLOOMBERG_EXCHANGE_MNEMONIC,BLOOMBERG_EXCHANGE_NAME,SEGMENT_MIC,
+                                OPERATING_MIC,ISO_COUNTRY_CODE,ISO_EXCH_NAME,FROM_DT,THRU_DT 
+                                FROM BLOOMBERG_EXCH_MIC_MAP"""
+                self.marketDB.dbCursor.execute(query)
+                r = self.marketDB.dbCursor.fetchall()
+                headers = ['BLOOMBERG_EXCHANGE_MNEMONIC','BLOOMBERG_EXCHANGE_NAME','SEGMENT_MIC','OPERATING_MIC','ISO_COUNTRY_CODE','ISO_EXCH_NAME','FROM_DT','THRU_DT']
+                return pd.DataFrame(r,columns=headers)
 
-                self.TRBBGFutType={('Commodity Future','Commodity Future'):'Commodity Future',
-                                   ('Commodity Future','Transportation Future'):'Commodity Future',
-                                   ('Commodity Future','Weather Future'):'Commodity Future',
-                                   ('Commodity Future','Energy Future'):'Commodity Future',
-                                   ('Index Future','Equity/Index Future'):'Index Future',
-                                   ('Equity Future','Equity/Index Future'):'Equity Future',
-                                   ('Currency Future','Commodity Future'):'Currency Future',
-                                   ('Bond Future/IR Future','Bond Future'):'Bond Future',
-                                   ('Bond Future/IR Future','Interest Rate Future'):'Interest Rate Future'}
+        def getTicker(self,jobs):
+                if 'idValue' in jobs[0]:
+                        return jobs[0].get('idValue')
+                raise ValueError(' No idValue in lookup job.')
 
+        def parseBloombergTicker(self,Ticker):
+                # Future contract month and contract year are translated from Bloomberg Ticker
+                # For Ticker=XAZ0 Comdty, we assume the following results
+                # contract_month = 'DEC'
+                # contract_year = 0 
+                # asset_category_cd in ('BFU','CFU','IRF','EFU')
+
+                EJV_Inputs = dict()
+                tickerLen = len(Ticker.split(' '))
+                if tickerLen == 0 or tickerLen > 2:
+                        # Assuming Tickers are formated in two parts, i.e. "XAZ0 Comdty"
+                        print('\nUnexpected IdType. Expected Bloomberg Ticker format "<Ticker> <marketSector>". For example: "FGRZ0 Index"')
+                        print(' Received Ticker {0}\n'.format(Ticker))
+                        raise ValueError
+                TickerPrefix = Ticker.split(' ')[0]
+                contract_year = TickerPrefix[len(TickerPrefix)-1:len(TickerPrefix)]
+                try:
+                        contract_year = int(contract_year)
+                except:
+                        # Assuming last character of Bloomberg Tickers are integers
+                        print('Failed to convert contract year {0} to integer in Ticker={1}'.format(contract_year,Ticker))
+                        raise ValueError
+
+                EJV_Inputs['BBprefix'] = TickerPrefix
+                EJV_Inputs['contract_month'] = self.FutureCodeToMonth.get(TickerPrefix[len(TickerPrefix)-2:len(TickerPrefix)-1])
+                EJV_Inputs['contract_year'] = contract_year
+
+                if tickerLen == 1:
+                        EJV_Inputs['BBsuffix'] = None
+                        EJV_Inputs['asset_category_cd'] = None
+                        return EJV_Inputs
+                TickerSuffix = Ticker.split(' ')[1]
+                EJV_Inputs['BBsuffix'] = TickerSuffix
+                EJV_Inputs['asset_category_cd'] = self.ejv_bb_asset_category.get(TickerSuffix)
+                return EJV_Inputs
+                
         def getOpenFigiData(self,jobs):
                 # The response is an Array of Objects where the Object at index i contains the results for the Mapping Job at index i in the request.
                 # Each Object has one of the following properties:
                 # 'data' is present when FIGI(s) are found for the associated Mapping Job. 
-                # 'error' is present when no FIGI is found or there was an error when processing the associated Mapping Job.                        
+                # 'error' is present when no FIGI is found or there was an error when processing the associated Mapping Job.                       
                 too_many_mapping_jobs = len(jobs) > (100 if openfigi_apikey else 5)
                 assert not too_many_mapping_jobs, 'Too many mapping jobs. Mapping jobs cannot excede 100/min with api key, else 5/min.'
                 i=0
@@ -79,22 +131,33 @@ class FindFutureMapping:
                                 continue
                         break
                 if r.status_code == 200:
-                        # each tuple is a job<>result mapping
-                        output=list(zip(jobs,r.json()))
+                        res = r.json()
+                        if 'data' in res[0]:
+                                # each tuple is a job to result mapping
+                                output=list(zip([j['idValue'] for j in jobs],res))
                 if r.status_code != 200 and r.status_code != 429 and r.status_code != 504:
                         logging.info('OpenFigi returned status code {1} ({0})'.format(r.reason,r.status_code))
                         logging.error('OpenFigi failed: {}'.format(r.text))
                         raise OpenFigiException(r.text)                                                                
                 return output
 
+        def getOpenFigiDataUsingBaseTicker(self,jobs):
+                Ticker = self.getTicker(jobs)
+                baseTicker = Ticker.split(' ')[0]
+                jobs = [{"idType":"TICKER", "idValue":baseTicker}]
+                return jobs
+
         def filterBloombergFutures(self,jobs):
                 # Filters api results on futures.
-                results=self.getOpenFigiData(jobs)
+                results = self.getOpenFigiData(jobs)
                 if len(results) == 0:
-                        return 'No results found for {}'.format(jobs)
+                        job = self.getOpenFigiDataUsingBaseTicker(jobs)
+                        results = self.getOpenFigiData(job)
+#                        raise ValueError(' No results from API search.')
                 output = []
                 for job in results:
-                        # job is a tuple mapping lookup to response
+                        #raise Exception
+                        # job is a tuple mapping of lookup to response
                         if 'data' in job[1]:
                                 # successful responses
                                 try:
@@ -112,236 +175,206 @@ class FindFutureMapping:
                                 except Exception as e:
                                         logging.error(' Unable to parse API results. \n {}'.format(e))  
                                         sys.exit(1)
-                        else:
-                                # Jobs encountering OpenFigi errors
-                                err = 'No identifier found.'
-                                err_msg = job[1].get('error')
-                                if job[1]['error'] != err: 
-                                        logging.error(' Error processing id: {}. Skipping the job.'.format(job[0]) + '\n' + err_msg)
-                                else:
-                                        logging.info(' {0} Skipping {1}'.format(err,job[0]))
                 return output
-        
-        def EJVRIC(self,Input,ID,DT):
-                if Input=='RIC-DT':
-                        query="""select distinct substring(ric,1,len(ric_root)+2) as CleanRIC,
-                        ric_root,rcs_cd,asset_category_cd,
-                        case when asset_category_cd='EFU' then 'Energy Future'
-                        when asset_category_cd='BFU' then 'Bond Future'
-                        when asset_category_cd='CFU' then 'Currency Future'
-                        when asset_category_cd='CMF' then 'Commodity Future'
-                        when asset_category_cd='EIF' then 'Equity/Index Future'
-                        when asset_category_cd='IRF' then 'Interest Rate Future'
-                        when asset_category_cd='TFU' then 'Transportation Future'
-                        when asset_category_cd='WFU' then 'Weather Future'
-                        else 'Not Identified' end TRCategory,
-                        exchange_ticker,description,series_desc,
-                        asset_category_cd,contract_month_year,trading_status,trading_style,periodicity,
-                        currency_cd,delivery_method,exchange_cd,exercise_style_cd,convert(varchar,expiration_dt,110) as expiration_dt,
-                        convert(varchar,first_trade_dt,110) as first_trade_dt, convert(varchar,last_trading_dt,110) as last_trading_dt,
-                        underlying_ric,unscaled_strike_px,
-                        lot_size,lot_units_cd,ric,ric_root,sec_asset_underlying_ric,series_desc,tick_value
-                        from [ejv_derivs].dbo.quote_xref where ric like '%s' and rcs_cd in ('fut','bondfut') and ric not like '%s'
-                        and expiration_dt>='%s' """%(ID+'%','%-%',DT)                                        
-                elif Input=='RICRoot-MonYear':
-                        query="""select distinct substring(ric,1,len(ric_root)+2) as CleanRIC,ric_root,rcs_cd,asset_category_cd,
-                        case when asset_category_cd='EFU' then 'Energy Future'
-                        when asset_category_cd='BFU' then 'Bond Future'
-                        when asset_category_cd='CFU' then 'Currency Future'
-                        when asset_category_cd='CMF' then 'Commodity Future'
-                        when asset_category_cd='EIF' then 'Equity/Index Future'
-                        when asset_category_cd='IRF' then 'Interest Rate Future'
-                        when asset_category_cd='TFU' then 'Transportation Future'
-                        when asset_category_cd='WFU' then 'Weather Future'
-                        else 'Not Identified' end TRCategory,
-                        exchange_ticker,description,series_desc,
-                        asset_category_cd,contract_month_year,trading_status,trading_style,periodicity,
-                        currency_cd,delivery_method,exchange_cd,exercise_style_cd,convert(varchar,expiration_dt,110) as expiration_dt,
-                        convert(varchar,first_trade_dt,110) as first_trade_dt, convert(varchar,last_trading_dt,110) as last_trading_dt,
-                        underlying_ric,unscaled_strike_px,
-                        lot_size,lot_units_cd,sec_asset_underlying_ric,series_desc,tick_value from [ejv_derivs].dbo.quote_xref where
-                        ric_root='%s' and contract_month_year='%s' and underlying_contract is null and ric not like '%s'
-                        and rcs_cd in('fut','bondfut')
-                        """%(ID,DT,'%-%')
-                self.cursor.execute(query)
-                openfigi_headers=[r[0] for r in self.cursor.description]
-                result=self.cursor.fetchall()
-                EJVOutput=[]
-                for i in result:
-                        dict={}
-                        for j in range(len(openfigi_headers)):
-                                dict[openfigi_headers[j]]=i[j]
-                        EJVOutput.append(dict)
-                return EJVOutput
 
-        def EJVRICRoot(self,ricroot,MonYear):
-                query="""select distinct substring(ric,1,len(ric_root)+2) as CleanRIC,ric_root,rcs_cd,asset_category_cd,exchange_ticker,description,series_desc,
-                asset_category_cd,contract_month_year,trading_status,trading_style,periodicity,
-                currency_cd,delivery_method,exchange_cd,exercise_style_cd,convert(varchar,expiration_dt,110) as expiration_dt,
-                convert(varchar,first_trade_dt,110) as first_trade_dt, convert(varchar,last_trading_dt,110) as last_trading_dt,
-                underlying_ric,unscaled_strike_px,
-                lot_size,lot_units_cd,sec_asset_underlying_ric,series_desc,tick_value from [ejv_derivs].dbo.quote_xref where 
-                ric_root='%s' and contract_month_year='%s' and underlying_contract is null and ric not like '%s'
-                and rcs_cd in('fut','bondfut')
-                """%(ricroot,MonYear,'%-%')
-                self.cursor.execute(query)
-                openfigi_headers=[r[0] for r in self.cursor.description]
-                result=self.cursor.fetchall()
-                return openfigi_headers,result
-        
+        def createLookupResultsDataFrame(self,jobs):
+                # Transforms the API response into DataFrame 
+                lookupResults = self.filterBloombergFutures(jobs)
+                i=0
+                dfList = []
+                for data in lookupResults:
+                        df = pd.DataFrame(data[1],index=[i])
+                        df['Lookup_Ticker'] = data[0]
+                        dfList.append(df)
+                        i+=1
+                try:
+                        combined_df = pd.concat(dfList)
+                        combined_df.reset_index(inplace=True,drop=True)
+                except ValueError:
+                        print(' API does not have any results for job {}'.format(jobs))
+                        exit(1)
+                return combined_df
+
+        def mapMicToBloomberTicker(self,jobs):
+                api_results_df = self.createLookupResultsDataFrame(jobs)
+                Ticker = jobs[0].get('idValue')
+                bloombergTickerInfo = self.parseBloombergTicker(Ticker)
+                bbExchMicMap = self.readBloombergExchMicMap()
+
+                BloombergExchCode = api_results_df['exchCode'].values
+                df_match = bbExchMicMap[bbExchMicMap['BLOOMBERG_EXCHANGE_MNEMONIC'] == BloombergExchCode[0]]
+                operating_mic = list(df_match.OPERATING_MIC)
+                market_mic = list(df_match.SEGMENT_MIC)
+                res_dict = {'Ticker':Ticker,'bbExch':BloombergExchCode[0],'operating_mic':operating_mic[0],'market_mic':market_mic[0]}
+                res_dict.update(bloombergTickerInfo)
+                return res_dict
+
+        def findEJVDerivfutures(self,jobs):
+                ''' Takes API results and finds Futures in EJV_Derivs with similar characteristics'''
+                TickerInfo = self.mapMicToBloomberTicker(jobs)
+                operating_mic = TickerInfo['operating_mic']
+                market_mic = TickerInfo['market_mic']
+                contract_month = TickerInfo['contract_month']
+                contract_year = TickerInfo['contract_year']
+                asset_category_cd = TickerInfo['asset_category_cd']
+
+                # Add query supplements as needed to identify asset type
+                # assuming all asset_category_cds in the GCODES Database are 3 characters long
+                # This is a somewhat hacky solution and could be refined
+                if TickerInfo['asset_category_cd'] is None:
+                        assetTypeQuery = ''
+                        logging.warning(' Could not find corresponding asset_category_cd.')
+                elif len(list(asset_category_cd)) <= 3:
+                        assetTypeQuery = "and asset_category_cd = '" + asset_category_cd + "'" 
+                else:
+                        assetTypeQuery = 'and asset_category_cd in {}'.format(asset_category_cd)
+
+                query = """
+                SELECT distinct ric_root,exchange_ticker,market_mic,operating_mic,series_desc FROM EJV_derivs.dbo.quote_xref
+                WHERE expiration_dt > getdate()
+                and ric not like '%c[0-9][10-99]'
+                and ric not like '%c[0-9]'
+                and trading_status = 1
+                and (market_mic = '{0}' or operating_mic = '{1}')
+                and left(contract_month_year,3) = '{2}'
+                and isnumeric(right(ric,1)) = 1
+                and right(ric,1) = {3}
+                and rcs_cd = 'FUT'
+                and put_call_indicator is null 
+                {4}
+                """.format(market_mic,operating_mic,contract_month,contract_year,assetTypeQuery)
+                if asset_category_cd == 'EIF':
+                        query = query + " and series_desc not like '%Dividend Index Future%' and series_desc not like '%Dividend Future%' and series_desc not like '%Equity Future%' and series_desc not like '%Equity Total Return Future%' and series_desc not like '%Single Stock Future%' "
+                query = query + " order by ric_root "
+                print(' Running this query on EJV_Derivs:\n {}'.format(query))
+                self.marketData.dbCursor.execute(query)
+                r = self.marketData.dbCursor.fetchall()
+                return r 
+                
+        def lookupEJVDerivFuturesOnOpenFigi(self,jobs):
+                EJVresults = self.findEJVDerivfutures(jobs)
+                # Bloomberg Ticker we want to map to RIC
+                Ticker = self.getTicker(jobs)
+                baseTicker = Ticker.split(' ')[0]
+                marketSecDes = Ticker.split(' ')[1]
+                if marketSecDes not in self.bbFutTickerSuffix:
+                        logging.warning(' marketSecDes={} in lookup but not mapped in this scripts definitions.'.format(marketSecDes))
+                # OpenFigi API results for EJV Exchange Ticker  
+                logging.info(' Running EJV results on OpenFigi...')
+                for res in EJVresults: 
+                        job = [{"idType":"ID_EXCH_SYMBOL","idValue":res[1],"securityType2":"Future","marketSecDes":marketSecDes,'micCode':res[2]}]
+                        print(res)
+                        r = self.filterBloombergFutures(job)
+                        for i in r:
+                                # search for OpenFigi results matching original Bloomberg ticker and return the first match.
+                                # If direct match is found we exit since API results are unique. 
+                                if i[1].get('uniqueIDFutOpt') == Ticker:
+                                        print(i)
+                                        df = pd.DataFrame(i[1],index=[i[0]])
+                                        df['RIC_ROOT'] = res[0]
+                                        return df
+                # Search again using TICKER instead of ID_EXCH_SYMBOL
+                for res in EJVresults:
+                        job = self.getOpenFigiDataUsingBaseTicker(jobs)
+                        r = self.filterBloombergFutures(job)
+                        for i in r:
+                                if i[1].get('ticker') == baseTicker:
+                                        print(i)
+                                        df = pd.DataFrame(i[1],index=[i[0]])
+                                        df['RIC_ROOT'] = res[0]
+                                        return df
+                print(' Could not find matching RIC or exchange ticker for {0} using OpenFigi.'.format(Ticker))
+                return None
+
         def findDataSteamFutures(self,ExchTicker):
                 query=""" select cr.ContrCode,cr.ContrTypeCode,cr.ContrName,cr.ExchTickerSymb, ft.Desc_ as exchange, 
-                ft2.Desc_ as underlying,ft.Desc_ as exchange, cls.TrdPlatformCode, cls.TrdStatCode
-                from PROD_VNDR_DB.qai.dbo.DSFutContr cr,  
-                PROD_VNDR_DB.qai.dbo.DSFutcode ft, 
-                PROD_VNDR_DB.qai.dbo.DSFutcode ft2, 
-                PROD_VNDR_DB.qai.dbo.DSFutClass cls
+                ft2.Desc_ as underlying, cls.TrdPlatformCode, cls.TrdStatCode
+                from tarvos.qai.dbo.DSFutContr cr,  
+                tarvos.qai.dbo.DSFutcode ft, 
+                tarvos.qai.dbo.DSFutcode ft2, 
+                tarvos.qai.dbo.DSFutClass cls
                 where cr.ExchTickerSymb='{0}' and 
                 ft.Code=cr.SrcCode and ft.Type_=1 
                 and ft2.Code=cr.UndrInstrCode and ft2.Type_=2 
                 and cls.ContrCode=cr.ContrCode""".format(ExchTicker)
-                self.cursor.execute(query)
-                return self.cursor.fetchall()
+                self.mssql.dbCursor.execute(query)
+                r = self.mssql.dbCursor.fetchall()
+                headers = ['ContrCode','ContrTypeCode','ContrName','ExchTickerSymb','exchange','underlying','TrdPlatformCode','TrdStatCode']
+                df = pd.DataFrame(r,columns=headers) 
+                return df
 
-        def FutureMap(self,BBGTicker,RIC,Dt):
-                RIC=self.EJVRIC('RIC-DT',RIC,Dt)
-                RICdf=pd.DataFrame(RIC[1],columns=RIC[0])
-                BBGOutput=self.getOpenFigiData('TICKER',BBGTicker)
-                exchticker=[]
-                for i in RIC[1]:
-                        if i[2] not in exchticker:
-                                exchticker.append(i[2])
-                BBGExchTicker=dict()
-                BBGMap={}
-                result=pd.DataFrame()
-                for ticker in exchticker:
-                        BBGExchTicker[ticker]=self.getOpenFigiData('ID_EXCH_SYMBOL',ticker)
-                        if len(BBGExchTicker[ticker])==0:
-                                result['Message']=['No BBG record found!']
-                        else:
-                                BBGMap[ticker]=BBGOutput.merge(BBGExchTicker[ticker],on='figi',how='inner')
-                                if len(BBGMap[ticker]) ==1:
-                                        result=pd.concat([RICdf[RICdf['exchange_ticker']==ticker],BBGMap[ticker]],axis=1)
-                                        result['Message']=['One Mapping Found!']
-                                        logging.info('One Mapping Found!')
-                                        break
-                                elif len(BBGMap[ticker]) >1:
-                                        result['Message']=['Multiple Mapping Found!']
-                                else:
-                                        result['Message']=['No Mapping Found!']
-                return result
-
-        def FutureMapCheck(self,BBGTicker,Input,RIC,Dt):
-                 RIC=self.EJVRIC(Input,RIC,Dt)
-                 BBGOutput=self.getBBGFuture('TICKER',BBGTicker)
-                 output=dict()
-                 if len(RIC)==0 and len(BBGOutput)==0:
-                         output['Comment']='No RIC and No BBG-ID Found!'
-                 elif len(RIC)==0 and len(BBGOutput)>0 and BBGOutput[0]=='N':
-                         output['Comment']=BBGOutput
-                 elif len(RIC)==0 and len(BBGOutput)>0 and BBGOutput[0]!='N':
-                         for bbg in BBGOutput:
-                                 output=bbg
-                                 output['Comment']='Only BBG-ID Found!'
-                 elif len(RIC)>0 and len(BBGOutput)==0:
-                         for ric in RIC:
-                                 output=RIC
-                                 output['Comment']='Only RIC Found!'
-                 elif len(RIC)>0 and len(BBGOutput)>0 and BBGOutput[0]!='N':
-                         for ric in RIC:
-                                 for bbg in BBGOutput:
-                                         if ric.get('CleanRIC')[-2:]==bbg.get('ticker')[-2:]:
-                                                 if (bbg.get('BBGFutureType'),ric.get('TRCategory')) in list(self.TRBBGFutType.keys()):
-                                                         output=dict(list(ric.items())+list(bbg.items()))
-                                                         output['FutureType']=self.TRBBGFutType.get((bbg.get('BBGFutureType'),ric.get('TRCategory')))
-                                                         output['Comment']='Mapping found!'
-                                                 else:
-                                                         output=dict(list(ric.items())+list(bbg.items()))
-                                                         output['Comment']='Mapping Not Match!'
-                                                         output['FutureType']='Future Type Not Match!'
-
-                 elif len(RIC)>0 and len(BBGOutput)>0 and BBGOutput[0]=='N':
-                         for ric in RIC:
-                                 output=ric
-                                 output['Comment']='Only RIC Found!'
-                 
-                 return output
+        def checkDataStreamLinkage(self,ejv_api_results):
+                if ejv_api_results is not None:
+                        r = self.findDataSteamFutures(ejv_api_results.index.item())
+                        if len(r) == 0:
+                                logging.info(' No DataStream matches.')
+                                return None
+                        logging.info(' DataStream results:')
+                        return r
+                return None
         
-        def testfunction(self,CategoryEnum,dt):
-                CategoryEnumlist=['Commodity Future','Currency Future','Equity Future','Equity Index Future','Interest Rate Future','Bond Future',
-                                  'Equity Volatility Index Future','Equity Index Future - Derivs','Equity Index Future - Axioma','Commodity Future - Axioma','Commodity Future - Derivs']
-                query2="""select ce.reportingSubCategoryName,ce.ReportingCategoryName,
-                dsmp.DataScope_RicRoot,dsmp.BloombergTickerPreface,dsmp.Description 
-                from marketdata.dbo.datastreamfuturesmapping dsmp, Metadata.dbo.CategoryEnum ce where dsmp.CategoryEnum=ce.CategoryEnum
-                and ce.reportingSubCategoryName in ('%s') and BloombergTickerPreface<>''"""%(CategoryEnum)
-                self.cursor.execute(query2)
-                result2=self.cursor.fetchall()
-                Map={}
-                for i in result2:
-                        RICRoot=i[2]
-                        query3="""select  RIC_root,contract_month_year from EJV_Derivs.dbo.quote_xref where ric_root='%s' and rcs_cd in ('fut','bondfut') and expiration_dt in
-                        (select max(expiration_dt) from EJV_Derivs.dbo.quote_xref where ric_root='%s' and expiration_dt<='%s')"""%(RICRoot,RICRoot,dt)
-                        self.cursor.execute(query3)
-                        result3=self.cursor.fetchall()
-                        for j in result3:
-                                suffix=self.FutureMonthMap.get(j[1][:3])+j[1][-1]
-                                BBG=i[3]+suffix
-                                test=self.FutureMapCheck(BBG,'RICRoot-MonYear',RICRoot,j[1])
-                                print(CategoryEnum,RICRoot,j[1], BBG, test.get('Comment'),test.get('ric'),test.get('ric_root'),test.get('ticker'),test.get('FutureType'))
-                return ''
-         
-        #delete?# 
-        def CheckEJVBBGMap(self,ricroot,MonYear):
-                RICRoot=self.EJVRICRoot(ricroot,MonYear)
-                RICdf=pd.DataFrame(RICRoot[1],columns=RICRoot[0])
-                exchticker=[]
-                for i in  RICRoot[1]:
-                        if i[2] not in exchticker:
-                                exchticker.append(i[2])
-                BBGExchTicker=dict()
-                for ticker in exchticker:
-                        BBGExchTicker[ticker]=self.getOpenFigiData('ID_EXCH_SYMBOL',ticker)
-                        BBG=BBGExchTicker[ticker][(BBGExchTicker[ticker]['marketSector']=='Index')&(BBGExchTicker[ticker]['securityType2']=='Future')]
-                        for i in BBG['ticker']:
-                                if i[-2:]==self.FutureMonthMap.get(MonYear[0:3])+MonYear[-1]:
-                                        newBBG=BBG[BBG['ticker']==i]
-                                        newBBG['exchange_ticker']=ticker
-                                        RIC=RICdf[RICdf['exchange_ticker']==ticker]
-                                        result=RIC.merge(newBBG,on='exchange_ticker',how='outer')
-                                        break
-                                else:
-                                        result=[]                                        
-                return result
+        def findFutures(self,jobs):
+                # Single security lookup
+                Ticker = jobs[0].get('idValue') 
+                query = """SELECT * from Xref WHERE SecurityIdentifierType='Ticker' AND SecurityIdentifier='{}'""".format(Ticker)
+                print(' Checking Xref ')
+                self.marketData.dbCursor.execute(query)
+                r = self.marketData.dbCursor.fetchall()
+                if len(r) > 0:
+                        print(' Found AxiomaDataId')
+                        headers = ['AxiomaDataId','SecurityIdentifierType','SecurityIdentifier','FromDate','ToDate','Lud','Lub']
+                        df = pd.DataFrame(r,columns=headers) 
+                        return df
+                print(' AxiomaDataId not found')
+                return None
 
 if __name__ == '__main__':
-        usage = "usage: %prog [options] --user <user> --passwd <passwd> --report-file <report-file> --database <database> DATE"
+        usage = "usage: %prog [options] <config file name> <Bloomberg Ticker> --user <user> --passwd <passwd> --report-file <report-file> --database <database>"
         cmdlineParser = optparse.OptionParser(usage=usage)
         Utilities.addDefaultCommandLine(cmdlineParser)
                     
         cmdlineParser.add_option("--user", action="store",
-                                 default='dummy_un', dest="user",
+                                 default='DummyUsername', dest="user",
                                  help="DB user name")
         cmdlineParser.add_option("--passwd", action="store",
-                                 default='dummy_pw', dest="passwd",
+                                 default='DummyPassword', dest="passwd",
                                  help="DB password name")
         cmdlineParser.add_option("--database", action="store",
                                  default='MarketData', dest="database",
                                  help="DB name")
         cmdlineParser.add_option("--host", action="store",
-                                 default='prod-mac-mkt-db', dest="host",
+                                 default='DummyDatabase', dest="host",
                                  help="DB server name")
+        cmdlineParser.add_option("--check-instrumentxref", action="store",
+                                 dest="checkXref", default=False,
+                                 help="Check MarketData DB coverage")
         (options_, args_) = cmdlineParser.parse_args()
-
+        configFile_ = open(args_[0])
+        config_ = configparser.ConfigParser()
+        config_.read_file(configFile_)
+        configFile_.close()
+        connections = Connections.createConnections(config_)
         dbConn=pymssql.connect(user=options_.user, password=options_.passwd, host=options_.host, database=options_.database)
-        findmapping=FindFutureMapping(dbConn)
-        #data = [{ "idType": "ID_ISIN", "idValue": "US4592001014" }, { "idType": "TICKER", "idValue": "MDRZ0" ,"marketSecDes":"CURNCY"}, { "idType":"TICKER", "idValue":"NDV20","marketSecDes":"Comdty"}, { "idType": "ID_WERTPAPIER", "idValue": "851399", "exchCode": "US" }, { "idType": "ID_BB_UNIQUE", "idValue": "EQ0010080100001000", "currency": "USD" }, { "idType": "ID_SEDOL", "idValue": "2005973", "micCode": "EDGX", "currency": "USD" }, { "idType":"BASE_TICKER", "idValue":"TSLA 10 C100", "securityType2":"Option", "expiration":["2018-10-01", "2018-12-01"]}, { "idType":"BASE_TICKER", "idValue":"NFLX 9 P330", "marketSecDes":"Equity", "securityType2":"Option", "strike":[330,None], "expiration":["2018-07-01",None]}, { "idType":"BASE_TICKER", "idValue":"FG", "marketSecDes":"Mtge", "securityType2":"Pool", "maturity":["2019-09-01", "2020-06-01"]}, { "idType":"BASE_TICKER", "idValue":"IBM", "marketSecDes":"Corp", "securityType2":"Corp", "maturity":["2026-11-01",None]}, { "idType":"BASE_TICKER", "idValue":"2251Q", "securityType2":"Common Stock", "includeUnlistedEquities": True}]
-        #data =  [{"idType":"ID_EXCH_SYMBOL","idValue":"ATW","securityType2":"Future","exchCode":"ICF"}]
-        #data = [{ "idType":"BASE_TICKER", "idValue":"XAZ0 Comdty"}]
-        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"XAZ0 Comdty"},{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"2LZ2 Comdty"},{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"0LZ1 Comdty"}]
-        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"A2LV=Z2 GR Equity"}] #sinlge stock dividend future
+        findmapping = FindFutureMapping(dbConn,config_, connections)
+        Bloomberg_Ticker = args_[1]
+        data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":Bloomberg_Ticker}]
+        if options_.checkXref:
+                checkMarketData = findmapping.findFutures(data)
+                print(checkMarketData)
+        checkEJV = findmapping.lookupEJVDerivFuturesOnOpenFigi(data)
+        print(checkEJV)
+        checkDS = findmapping.checkDataStreamLinkage(checkEJV)
+        print(checkDS)
+
+        #### Test cases ####
+        #data = [{"idType":"UNIQUE_ID_FUT_OPT", "idValue":"ACCZ0 Index"}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":'MWBZ0 Index'}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":'LFOZ0 Index'}]
+        #data = [{"idType":"TICKER", "idValue":"ACCZ0"}] 
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":'HWRZ0 Index'}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":'HJAV0 Index'}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":'FGRZ0 Index'}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"FGRZ00 Index"}]
         #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"XAZ0 Comdty"}]
-        data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"SFIH2 Comdty"}]
-        #data = [{ "idType":"BASE_TICKER", "idValue":"IBM", "marketSecDes":"Corp", "securityType2":"Corp", "maturity":["2026-11-01",None]}]
-        #data = [{ "idType":"TICKER", "idValue":"NDV20","marketSecDes":"Comdty"},{ "idType": "TICKER", "idValue": "MDRZ0" ,"marketSecDes":"Curncy"},{ "idType": "TICKER", "idValue": "MDRZ0" ,"marketSecDes":"CURNCY"}]
-        BBGFutureMappings = findmapping.filterBloombergFutures(data)
-        print(BBGFutureMappings)
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"RSWZ0 Index"}]
+        #data = [{ "idType":"UNIQUE_ID_FUT_OPT", "idValue":"2LZ2 Comdty"}]
