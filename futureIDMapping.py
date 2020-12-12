@@ -289,10 +289,10 @@ class FindFutureMapping:
         def findDataSteamFutures(self,ExchTicker):
                 query=""" select cr.ContrCode,cr.ContrTypeCode,cr.ContrName,cr.ExchTickerSymb, ft.Desc_ as exchange, 
                 ft2.Desc_ as underlying, cls.TrdPlatformCode, cls.TrdStatCode
-                from tarvos.qai.dbo.DSFutContr cr,  
-                tarvos.qai.dbo.DSFutcode ft, 
-                tarvos.qai.dbo.DSFutcode ft2, 
-                tarvos.qai.dbo.DSFutClass cls
+                from dbo.DSFutContr cr,  
+                dbo.DSFutcode ft, 
+                dbo.DSFutcode ft2, 
+                dbo.DSFutClass cls
                 where cr.ExchTickerSymb='{0}' and 
                 ft.Code=cr.SrcCode and ft.Type_=1 
                 and ft2.Code=cr.UndrInstrCode and ft2.Type_=2 
