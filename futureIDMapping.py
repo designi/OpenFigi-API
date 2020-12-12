@@ -48,7 +48,7 @@ class FindFutureMapping:
                 self.bloombergSecurityTypes = {'Financial index future.': 'Index','Generic currency future.':'Curncy','Generic index future.':'Index','Physical commodity future.': 'Comdty','Financial commodity future.': 'Comdty','SINGLE STOCK DIVIDEND FUTURE': 'Equity','DIVIDEND NEUTRAL STOCK FUTURE': 'Equity', 'Currency future.': 'Curncy', 'Physical index future.': 'Index'}
                 self.marketSecDes = list(set(self.bloombergSecurityTypes.values()))
                 self.bbFutTickerSuffix = ('Comdty','Curncy','Index','Equity')
-                self.ejv_bb_asset_category = {'Curncy': 'CFU', 'Index': 'EIF','Comdty':('BFU','CFU','IRF','EFU')}
+                self.ejv_bb_asset_category = {'Curncy': 'CFU', 'Index': 'EIF','Comdty':('BFU','IRF','EFU')}
                 self.ejv_asset_category_descr = ({'BFS':'Bond Future Spread','BFU':'Bond Future','CFU':'Currency Future','CMF':'Commodity Future','EIF':'Equity/Index Future','IRF':'Interest Rate Future'})
         
         def readBloombergExchMicMap(self):
